@@ -1,0 +1,12 @@
+# secrets
+.env
+.streamlit/secrets.toml
+
+# python
+__pycache__/
+
+# editor
+.vscode/
+
+# system
+.DS_Store
