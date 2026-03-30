@@ -17,7 +17,7 @@ ensure_project_on_syspath()
 
 from repositories.candidate_repository import CandidateRepository
 from repositories.vector_repository import VectorRepository
-from services.candidate_chat import answer_candidate_question
+from services.candidate_chat import stream_candidate_answer
 from services.document_parser import SUPPORTED_EXTENSIONS, is_supported_filename
 from services.ingestion import IngestionService
 from utils.config import (
@@ -366,17 +366,27 @@ if records:
                     with st.chat_message("user"):
                         st.markdown(user_question)
                     with st.chat_message("assistant"):
-                        with st.spinner("思考中…"):
+                        pieces: list[str] = []
+
+                        def _token_stream():
                             try:
-                                answer = answer_candidate_question(
+                                for t in stream_candidate_answer(
                                     candidate=detail,
                                     question=user_question,
                                     config=cfg,
                                     history=chat_history[:-1],
-                                )
+                                ):
+                                    pieces.append(t)
+                                    yield t
                             except Exception as exc:  # noqa: BLE001
-                                answer = f"抱歉，问答失败：{type(exc).__name__}: {exc}"
-                        st.markdown(answer)
+                                err = (
+                                    f"抱歉，问答失败：{type(exc).__name__}: {exc}"
+                                )
+                                pieces.append(err)
+                                yield err
+
+                        st.write_stream(_token_stream())
+                        answer = "".join(pieces).strip()
                     chat_history.append({"role": "assistant", "content": answer})
 else:
     st.info("暂无候选人，请先上传简历。")

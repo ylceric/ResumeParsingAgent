@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import TypedDict
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -50,7 +51,24 @@ def _history_to_text(history: list[ChatTurn], limit: int = 12) -> str:
     return "\n".join(f"{h['role']}: {h['content']}" for h in history[-limit:])
 
 
-def answer_jd_match_question(
+def _message_chunk_text(chunk: object) -> str:
+    if chunk is None:
+        return ""
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return ""
+
+
+def stream_jd_match_answer(
     *,
     jd_text: str,
     jd_structured: JDRequirements,
@@ -58,7 +76,8 @@ def answer_jd_match_question(
     question: str,
     config: AppConfig,
     history: list[ChatTurn] | None = None,
-) -> str:
+) -> Iterator[str]:
+    """Stream answer tokens (for st.write_stream)."""
     llm = chat_llm(config, temperature=0.2)
     prompt = ChatPromptTemplate.from_messages([("system", _SYSTEM), ("human", _USER)])
     chain = prompt | llm
@@ -81,5 +100,28 @@ def answer_jd_match_question(
         "history_text": _history_to_text(history or []),
         "question": question,
     }
-    out = chain.invoke(payload)
-    return str(getattr(out, "content", out)).strip()
+    for chunk in chain.stream(payload):
+        text = _message_chunk_text(chunk)
+        if text:
+            yield text
+
+
+def answer_jd_match_question(
+    *,
+    jd_text: str,
+    jd_structured: JDRequirements,
+    results: list[CandidateMatchResult],
+    question: str,
+    config: AppConfig,
+    history: list[ChatTurn] | None = None,
+) -> str:
+    return "".join(
+        stream_jd_match_answer(
+            jd_text=jd_text,
+            jd_structured=jd_structured,
+            results=results,
+            question=question,
+            config=config,
+            history=history,
+        )
+    ).strip()

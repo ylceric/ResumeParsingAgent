@@ -12,7 +12,7 @@ from repositories.candidate_repository import CandidateRepository
 from repositories.vector_repository import VectorRepository
 from schemas.jd import JDRequirements
 from schemas.match import CandidateMatchResult
-from services.jd_match_chat import answer_jd_match_question
+from services.jd_match_chat import stream_jd_match_answer
 from services.matching import MatchingService
 from utils.config import (
     DEFAULT_JD_RETRIEVAL_TOP_K,
@@ -212,24 +212,32 @@ if "jd_match_context" in st.session_state:
                 with st.chat_message("user"):
                     st.markdown(user_question)
                 with st.chat_message("assistant"):
-                    with st.spinner("思考中…"):
+                    jd_obj = JDRequirements.model_validate(ctx["jd_structured"])
+                    result_objs = [
+                        CandidateMatchResult.model_validate(x)
+                        for x in ctx["results"]
+                    ]
+                    pieces: list[str] = []
+
+                    def _token_stream():
                         try:
-                            jd_obj = JDRequirements.model_validate(ctx["jd_structured"])
-                            result_objs = [
-                                CandidateMatchResult.model_validate(x)
-                                for x in ctx["results"]
-                            ]
-                            answer = answer_jd_match_question(
+                            for t in stream_jd_match_answer(
                                 jd_text=ctx["jd_text"],
                                 jd_structured=jd_obj,
                                 results=result_objs,
                                 question=user_question,
                                 config=cfg,
                                 history=history[:-1],
-                            )
+                            ):
+                                pieces.append(t)
+                                yield t
                         except Exception as exc:  # noqa: BLE001
-                            answer = f"抱歉，问答失败：{type(exc).__name__}: {exc}"
-                    st.markdown(answer)
+                            err = f"抱歉，问答失败：{type(exc).__name__}: {exc}"
+                            pieces.append(err)
+                            yield err
+
+                    st.write_stream(_token_stream())
+                    answer = "".join(pieces).strip()
                 history.append({"role": "assistant", "content": answer})
 
 elif not jd_text.strip():
