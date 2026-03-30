@@ -9,7 +9,11 @@ from utils.bootstrap import ensure_project_on_syspath
 ensure_project_on_syspath()
 
 import streamlit as st
-from utils.ui import inject_material_header_styles, render_material_header
+from utils.ui import (
+    inject_branding_sidebar_and_footer,
+    inject_material_header_styles,
+    render_material_header,
+)
 
 st.set_page_config(
     page_title="Resume Parsing Agent",
@@ -17,6 +21,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+inject_branding_sidebar_and_footer()
 
 def _home_page() -> None:
     inject_material_header_styles()

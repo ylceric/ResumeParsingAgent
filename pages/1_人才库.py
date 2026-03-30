@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import tempfile
 from pathlib import Path
 
@@ -60,7 +61,7 @@ def _ingestion() -> IngestionService:
 inject_material_header_styles()
 
 
-st.title("人才录入 / 人才库")
+st.title(":material/group_add: 人才录入 / 人才库")
 
 cfg = _config()
 if not cfg.openai_api_key:
@@ -72,7 +73,7 @@ render_material_header(
     "支持 PDF / DOCX / TXT / PNG / JPG / JPEG",
 )
 st.caption(
-    f"支持：{', '.join(sorted(SUPPORTED_EXTENSIONS))} · 图片优先 OCR，文本过短时可走视觉模型（见 `OPENAI_VISION_FALLBACK`）"
+    f"支持：{', '.join(sorted(SUPPORTED_EXTENSIONS))} · 图片优先 OCR，在 OCR 不佳时可走视觉模型"
 )
 
 uploaded = st.file_uploader(
@@ -84,35 +85,55 @@ uploaded = st.file_uploader(
 if uploaded and st.button("开始解析并入库", type="primary"):
     service = _ingestion()
     results = []
-    progress = st.progress(0.0, text="处理中…")
-    for idx, file in enumerate(uploaded):
-        if not is_supported_filename(file.name):
-            results.append(
-                {
-                    "file": file.name,
-                    "ok": False,
-                    "message": "Unsupported extension",
-                }
+    n = len(uploaded)
+    with st.status("批量入库进行中…", expanded=True) as ingest_status:
+        st.caption("下方为逐步日志；关闭本面板可折叠，不影响结果表格。")
+
+        def _ingest_log(msg: str) -> None:
+            st.write(msg)
+
+        progress = st.progress(0.0, text=f"0 / {n} 个文件")
+        for idx, file in enumerate(uploaded):
+            _ingest_log(f"—— 第 {idx + 1}/{n} 个文件：{file.name} ——")
+            if not is_supported_filename(file.name):
+                _ingest_log("跳过：不支持的扩展名")
+                results.append(
+                    {
+                        "file": file.name,
+                        "ok": False,
+                        "message": "Unsupported extension",
+                    }
+                )
+                progress.progress((idx + 1) / n, text=f"{idx + 1} / {n}")
+                continue
+            suffix = Path(file.name).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(file.getbuffer())
+                tmp_path = tmp.name
+            try:
+                r = service.ingest_file(
+                    tmp_path, file.name, on_step=_ingest_log
+                )
+                results.append(
+                    {
+                        "file": r.source_file,
+                        "ok": r.success,
+                        "candidate_id": r.candidate_id or "",
+                        "message": r.message,
+                    }
+                )
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+            progress.progress((idx + 1) / n, text=f"{idx + 1} / {n}")
+            _ingest_log(
+                f"本文件结束：{'成功' if r.success else '失败'} — {r.message[:200]}"
+                + ("…" if len(r.message) > 200 else "")
             )
-            continue
-        suffix = Path(file.name).suffix
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(file.getbuffer())
-            tmp_path = tmp.name
-        try:
-            r = service.ingest_file(tmp_path, file.name)
-            results.append(
-                {
-                    "file": r.source_file,
-                    "ok": r.success,
-                    "candidate_id": r.candidate_id or "",
-                    "message": r.message,
-                }
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-        progress.progress((idx + 1) / len(uploaded), text=f"已完成 {idx + 1}/{len(uploaded)}")
-    progress.empty()
+        progress.empty()
+        ingest_status.update(
+            label=f"批量入库完成（共 {n} 个文件）",
+            state="complete",
+        )
     st.dataframe(pd.DataFrame(results), width="stretch")
 
 st.divider()
@@ -179,7 +200,28 @@ if records:
                 "source": r.source_file,
             }
         )
-    st.dataframe(pd.DataFrame(rows), width="stretch")
+    df_export = pd.DataFrame(rows)
+    st.dataframe(df_export, width="stretch")
+
+    _buf = io.BytesIO()
+    with pd.ExcelWriter(_buf, engine="openpyxl") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="candidates")
+    _buf.seek(0)
+    st.download_button(
+        "下载当前列表为 .xlsx",
+        data=_buf.getvalue(),
+        file_name="talent_library_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_talent_xlsx",
+    )
+
+    st.divider()
+
+    # render_material_header(
+    #     "search",
+    #     "查看详情",
+    #     "点击选择候选人查看详情",
+    # )
 
     pick = st.selectbox(
         "查看详情",

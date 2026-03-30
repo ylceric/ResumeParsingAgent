@@ -10,6 +10,8 @@ ensure_project_on_syspath()
 
 from repositories.candidate_repository import CandidateRepository
 from repositories.vector_repository import VectorRepository
+from schemas.jd import JDRequirements
+from schemas.match import CandidateMatchResult
 from services.jd_match_chat import answer_jd_match_question
 from services.matching import MatchingService
 from utils.config import (
@@ -51,8 +53,50 @@ def _matching() -> MatchingService:
     return MatchingService(_config(), _candidate_repo(), _vector_repo())
 
 
+def _render_match_results_from_context(ctx: dict) -> None:
+    """Render structured JD + cards from session (dict payloads)."""
+    render_material_header("fact_check", "结构化 JD 需求（LLM 抽取）", "来自最近一次匹配，刷新页面仍会保留")
+    st.json(ctx["jd_structured"])
+
+    results_raw = ctx.get("results") or []
+    if not results_raw:
+        st.warning("人才库为空或未能加载候选人。")
+        return
+
+    render_material_header("groups", "匹配结果（按总分排序）", f"共 {len(results_raw)} 人")
+    for r in results_raw:
+        a = r["analysis"]
+        with st.container():
+            st.markdown(f"#### {r.get('name') or '未命名'} · `{r.get('candidate_id')}`")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("总分", f"{a['total_match_score']:.1f}")
+            c2.metric("技能", f"{a['skill_match_score']:.1f}")
+            c3.metric("经验", f"{a['experience_match_score']:.1f}")
+            c4.metric("项目", f"{a['project_relevance_score']:.1f}")
+            c5.metric("领域", f"{a['domain_relevance_score']:.1f}")
+            col_l, col_r = st.columns(2)
+            with col_l:
+                st.write("**匹配证据**")
+                for x in a.get("matched_evidence") or []:
+                    st.write(f"- {x}")
+                st.write("**优势**")
+                for x in a.get("strengths") or []:
+                    st.write(f"- {x}")
+            with col_r:
+                st.write("**缺失 / 薄弱证据**")
+                for x in a.get("missing_or_weak_evidence") or []:
+                    st.write(f"- {x}")
+                st.write("**疑虑**")
+                for x in a.get("concerns") or []:
+                    st.write(f"- {x}")
+            st.write("**建议面试题**")
+            for x in a.get("interview_questions") or []:
+                st.write(f"- {x}")
+            st.divider()
+
+
 inject_material_header_styles()
-st.title("JD 匹配")
+st.title(":material/target: JD 岗位匹配")
 
 cfg = _config()
 if not cfg.openai_api_key:
@@ -83,18 +127,40 @@ with st.expander("匹配参数", expanded=False):
             help="对前 N 名候选人逐一调用匹配分析链。",
         )
 
-if st.button("开始匹配", type="primary") and jd_text.strip():
-    with st.spinner("正在抽取 JD 要求并分析候选人…"):
+col_run, col_clear = st.columns([3, 1])
+with col_run:
+    run_match = st.button("开始匹配", type="primary")
+with col_clear:
+    if st.button("清除已保存的匹配结果", use_container_width=True):
+        st.session_state.pop("jd_match_context", None)
+        st.session_state.pop("jd_match_chat_history", None)
+        st.rerun()
+
+if run_match and jd_text.strip():
+    jd = None
+    results: list[CandidateMatchResult] = []
+    with st.status("JD 匹配进行中…", expanded=True) as match_status:
+        st.caption("以下为各阶段说明：JD 抽取 → 召回 → 加载画像 → 逐人匹配分析。")
+
+        def _match_log(msg: str) -> None:
+            st.write(msg)
+
         try:
             jd, results = _matching().match(
                 jd_text.strip(),
                 keyword_fallback_query=jd_text[:500],
                 jd_retrieval_top_k=int(jd_retrieval_top_k),
                 match_candidate_top_n=int(match_candidate_top_n),
+                on_step=_match_log,
             )
         except Exception as exc:  # noqa: BLE001
+            match_status.update(label="JD 匹配失败", state="error")
             st.error(f"{type(exc).__name__}: {exc}")
             st.stop()
+        match_status.update(
+            label=f"JD 匹配完成（{len(results)} 位候选人）",
+            state="complete",
+        )
 
     st.session_state["jd_match_context"] = {
         "jd_text": jd_text.strip(),
@@ -102,101 +168,69 @@ if st.button("开始匹配", type="primary") and jd_text.strip():
         "results": [r.model_dump() for r in results],
     }
     st.session_state["jd_match_chat_history"] = []
-
-    render_material_header("fact_check", "结构化 JD 需求（LLM 抽取）")
-    st.json(jd.model_dump())
-
-    if not results:
-        st.warning("人才库为空或未能加载候选人。")
-        st.stop()
-
-    render_material_header("groups", "匹配结果（按总分排序）")
-    for r in results:
-        a = r.analysis
-        with st.container():
-            st.markdown(f"#### {r.name or '未命名'} · `{r.candidate_id}`")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("总分", f"{a.total_match_score:.1f}")
-            c2.metric("技能", f"{a.skill_match_score:.1f}")
-            c3.metric("经验", f"{a.experience_match_score:.1f}")
-            c4.metric("项目", f"{a.project_relevance_score:.1f}")
-            c5.metric("领域", f"{a.domain_relevance_score:.1f}")
-            col_l, col_r = st.columns(2)
-            with col_l:
-                st.write("**匹配证据**")
-                for x in a.matched_evidence:
-                    st.write(f"- {x}")
-                st.write("**优势**")
-                for x in a.strengths:
-                    st.write(f"- {x}")
-            with col_r:
-                st.write("**缺失 / 薄弱证据**")
-                for x in a.missing_or_weak_evidence:
-                    st.write(f"- {x}")
-                st.write("**疑虑**")
-                for x in a.concerns:
-                    st.write(f"- {x}")
-            st.write("**建议面试题**")
-            for x in a.interview_questions:
-                st.write(f"- {x}")
-            st.divider()
+    st.rerun()
 
 if "jd_match_context" in st.session_state:
     ctx = st.session_state["jd_match_context"]
-    render_material_header("chat", "JD 匹配结果问答（Chat Agent）")
-    st.caption("可追问：排序依据、候选人对比、风险优先级、面试题定制、是否放宽 JD 条件等。")
-    if not cfg.openai_api_key:
-        st.info("未配置 `OPENAI_API_KEY`，无法使用问答。")
-    else:
-        if "jd_match_chat_history" not in st.session_state:
-            st.session_state["jd_match_chat_history"] = []
-        history = st.session_state["jd_match_chat_history"]
+    st.divider()
+    left_col, right_col = st.columns([7, 3])
+    with left_col:
+        render_material_header(
+            "analytics",
+            "最近一次匹配结果",
+            "与右侧问答独立；使用 Chat 不会清空此处内容",
+        )
+        st.caption(f"JD 摘要长度：{len(ctx.get('jd_text', ''))} 字")
+        _render_match_results_from_context(ctx)
 
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            st.caption(
-                f"当前上下文：{len(ctx.get('results', []))} 位候选人匹配结果"
-            )
-        with col_b:
-            if st.button("清空本次问答", key="clear_jd_chat", use_container_width=True):
+    with right_col:
+        render_material_header("chat", "JD 匹配问答")
+        st.caption(
+            f"上下文：{len(ctx.get('results', []))} 位候选人 · 可追问对比、风险、面试题等"
+        )
+        if not cfg.openai_api_key:
+            st.info("未配置 `OPENAI_API_KEY`，无法使用问答。")
+        else:
+            if "jd_match_chat_history" not in st.session_state:
+                st.session_state["jd_match_chat_history"] = []
+            history = st.session_state["jd_match_chat_history"]
+
+            if st.button("清空对话记录", key="clear_jd_chat", use_container_width=True):
                 st.session_state["jd_match_chat_history"] = []
                 st.rerun()
 
-        for msg in history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            for msg in history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-        user_question = st.chat_input(
-            "问 AI：基于本次 JD 匹配结果回答…",
-            key="jd_match_chat_input",
-        )
-        if user_question:
-            history.append({"role": "user", "content": user_question})
-            with st.chat_message("user"):
-                st.markdown(user_question)
-            with st.chat_message("assistant"):
-                with st.spinner("思考中…"):
-                    try:
-                        from schemas.jd import JDRequirements
-                        from schemas.match import CandidateMatchResult
-
-                        jd_obj = JDRequirements.model_validate(ctx["jd_structured"])
-                        result_objs = [
-                            CandidateMatchResult.model_validate(x)
-                            for x in ctx["results"]
-                        ]
-                        answer = answer_jd_match_question(
-                            jd_text=ctx["jd_text"],
-                            jd_structured=jd_obj,
-                            results=result_objs,
-                            question=user_question,
-                            config=cfg,
-                            history=history[:-1],
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        answer = f"抱歉，问答失败：{type(exc).__name__}: {exc}"
-                st.markdown(answer)
-            history.append({"role": "assistant", "content": answer})
+            user_question = st.chat_input(
+                "问 AI：基于左侧匹配结果回答…",
+                key="jd_match_chat_input",
+            )
+            if user_question:
+                history.append({"role": "user", "content": user_question})
+                with st.chat_message("user"):
+                    st.markdown(user_question)
+                with st.chat_message("assistant"):
+                    with st.spinner("思考中…"):
+                        try:
+                            jd_obj = JDRequirements.model_validate(ctx["jd_structured"])
+                            result_objs = [
+                                CandidateMatchResult.model_validate(x)
+                                for x in ctx["results"]
+                            ]
+                            answer = answer_jd_match_question(
+                                jd_text=ctx["jd_text"],
+                                jd_structured=jd_obj,
+                                results=result_objs,
+                                question=user_question,
+                                config=cfg,
+                                history=history[:-1],
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            answer = f"抱歉，问答失败：{type(exc).__name__}: {exc}"
+                    st.markdown(answer)
+                history.append({"role": "assistant", "content": answer})
 
 elif not jd_text.strip():
     st.caption("输入 JD 后点击「开始匹配」。流程：抽取结构化 JD → 向量召回 top-k → 对每位候选人单独做可解释匹配。")
